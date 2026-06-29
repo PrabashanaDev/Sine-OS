@@ -86,9 +86,54 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt_entries[num].flags = flags;
 }
 
+void print_string(const char* data);
+
+// --- HARDWARE I/O PORTS ---
+// Write data to a hardware port
+static inline void outb(uint16_t port, uint8_t val) {
+    asm volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
+}
+// Read data from a hardware port
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    asm volatile ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
+    return ret;
+}
+
+// --- PIC REMAPPING ---
+// By default, hardware interrupts clash with CPU errors. 
+// We must remap them to start at Interrupt 32.
+void pic_remap() {
+    outb(0x20, 0x11);
+    outb(0xA0, 0x11);
+    outb(0x21, 0x20); // Master PIC offset (Interrupt 32)
+    outb(0xA1, 0x28); // Slave PIC offset (Interrupt 40)
+    outb(0x21, 0x04);
+    outb(0xA1, 0x02);
+    outb(0x21, 0x01);
+    outb(0xA1, 0x01);
+    outb(0x21, 0x0);  // Unmask all interrupts
+    outb(0xA1, 0x0);
+}
+
+// --- KEYBOARD HANDLER ---
+// This is the function the CPU jumps to when you press a key!
+void keyboard_handler_c() {
+    // The keyboard data port is always 0x60
+    uint8_t scancode = inb(0x60); 
+    
+    // If the highest bit is 0, it means a key was PRESSED (not released)
+    if (scancode < 0x80) { 
+        print_string("Key pressed! ");
+    }
+    
+    // We must tell the PIC that we finished handling the interrupt
+    outb(0x20, 0x20);
+}
+
 // Function to load the IDT into the CPU
 extern void idt_flush(uint32_t); 
-
+extern void keyboard_handler_isr(); // Link to assembly
 void init_idt() {
     idt_ptr.limit = (sizeof(struct idt_entry_struct) * 256) - 1;
     idt_ptr.base  = (uint32_t)&idt_entries;
@@ -97,6 +142,10 @@ void init_idt() {
     for(int i = 0; i < 256; i++) {
         idt_set_gate(i, 0, 0, 0);
     }
+
+    // MAP INTERRUPT 33 TO THE KEYBOARD HANDLER
+    // 0x08 is our Kernel Code Segment, 0x8E means "32-bit Interrupt Gate"
+    idt_set_gate(33, (uint32_t)keyboard_handler_isr, 0x08, 0x8E);
 
     idt_flush((uint32_t)&idt_ptr);
 }
@@ -150,10 +199,15 @@ void kernel_main(void) {
     terminal_initialize();
     init_gdt();
     
-    // Test our new print engine!
+    // Initialize Interrupts
+    pic_remap();
+    init_idt();
+    
+    // 'sti' stands for Set Interrupts (turns the listener on)
+    asm volatile("sti"); 
+    
     print_string("Terminal Engine Initialized.\n");
-    print_string("System Memory: OK\n");
-    print_string("CPU Architecture: 32-bit (x86)\n");
     print_string("GDT Loaded: Kernel now has memory authority!\n");
-    print_string("\nWelcome to the custom OS!");
+    print_string("IDT Loaded: Keyboard interrupts enabled!\n");
+    print_string("\nTry pressing some keys...\n\n");
 }
