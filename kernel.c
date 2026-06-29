@@ -1,7 +1,8 @@
+#include "string.h"
+
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
-typedef unsigned int size_t;
 
 const size_t VGA_WIDTH = 80;
 const size_t VGA_HEIGHT = 25;
@@ -272,6 +273,14 @@ void kernel_main(void) {
     print_string("Terminal Engine Initialized.\n");
     print_string("GDT Loaded: Kernel now has memory authority!\n");
     print_string("IDT Loaded: Keyboard interrupts enabled!\n");
+    
+    // Test our new libc itoa function
+    char number_buffer[16];
+    itoa(1337, number_buffer, 10);
+    print_string("Testing libc itoa: ");
+    print_string(number_buffer);
+    print_string("\n");
+
     print_string("\nTry pressing some keys...\n\n");
     
     // Enter an infinite loop so the kernel never returns
