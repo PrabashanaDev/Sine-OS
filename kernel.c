@@ -10,7 +10,7 @@ uint16_t* terminal_buffer = (uint16_t*) 0xB8000;
 // These variables keep track of where the cursor is
 size_t terminal_row = 0;
 size_t terminal_column = 0;
-uint8_t terminal_color = 15; // White on black
+uint8_t terminal_color = 2; // 2 = Green text on Black background // White on black
 
 // --- GDT STRUCTURES ---
 struct gdt_entry_struct {
@@ -87,6 +87,7 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
 }
 
 void print_string(const char* data);
+void terminal_putchar(char c);
 
 // --- HARDWARE I/O PORTS ---
 // Write data to a hardware port
@@ -116,15 +117,56 @@ void pic_remap() {
     outb(0xA1, 0xFF); // Mask all slave interrupts
 }
 
-// --- KEYBOARD HANDLER ---
+// --- KEYBOARD MAP & HANDLER ---
+// Standard US QWERTY Scancode lookup table
+const char keyboard_map[128] = {
+    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', /* Backspace */
+  '\t', /* Tab */
+  'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', /* Enter */
+    0, /* 29   - Control */
+  'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',   0, /* Left shift */
+ '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',   0, /* Right shift */
+  '*',
+    0,  /* Alt */
+  ' ',  /* Space bar */
+    0,  /* Caps lock */
+    0,  /* 59 - F1 key ... > */
+    0,   0,   0,   0,   0,   0,   0,   0,
+    0,  /* < ... F10 */
+    0,  /* 69 - Num lock*/
+    0,  /* Scroll Lock */
+    0,  /* Home key */
+    0,  /* Up Arrow */
+    0,  /* Page Up */
+  '-',
+    0,  /* Left Arrow */
+    0,
+    0,  /* Right Arrow */
+  '+',
+    0,  /* 79 - End key*/
+    0,  /* Down Arrow */
+    0,  /* Page Down */
+    0,  /* Insert Key */
+    0,  /* Delete Key */
+    0,   0,   0,
+    0,  /* F11 Key */
+    0,  /* F12 Key */
+    0, /* All other keys are undefined */
+};
+
 // This is the function the CPU jumps to when you press a key!
 void keyboard_handler_c() {
     // The keyboard data port is always 0x60
     uint8_t scancode = inb(0x60); 
     
-    // If the highest bit is 0, it means a key was PRESSED (not released)
-    if (scancode < 0x80) { 
-        print_string("Key pressed! ");
+    // SECURE ARRAY LOOKUP: 
+    // Ensure the scancode is less than 128 (meaning it was PRESSED, not released)
+    // and that it fits within our array bounds to prevent memory vulnerabilities!
+    if (scancode < 128) { 
+        char c = keyboard_map[scancode];
+        if (c != 0) { // If it's a valid, printable character
+            terminal_putchar(c);
+        }
     }
     
     // We must tell the PIC that we finished handling the interrupt
@@ -165,24 +207,45 @@ void terminal_initialize(void) {
 
 // 2. The core function: Write a single character and advance the cursor
 void terminal_putchar(char c) {
-    // If we receive a newline character, move to the next row and reset the column
     if (c == '\n') {
         terminal_column = 0;
         terminal_row++;
-        return;
+    } else if (c == '\b') { // Handle backspace
+        if (terminal_column > 0) {
+            terminal_column--;
+        } else if (terminal_row > 0) {
+            terminal_row--;
+            terminal_column = VGA_WIDTH - 1;
+        }
+        // Clear the character at the new cursor position
+        const size_t index = terminal_row * VGA_WIDTH + terminal_column;
+        terminal_buffer[index] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
+        return; // Exit early so we don't print a weird symbol
+    } else {
+        const size_t index = terminal_row * VGA_WIDTH + terminal_column;
+        terminal_buffer[index] = (uint16_t) c | (uint16_t) terminal_color << 8;
+        terminal_column++;
+        if (terminal_column == VGA_WIDTH) {
+            terminal_column = 0;
+            terminal_row++;
+        }
     }
 
-    // Write the character to the current cursor position
-    const size_t index = terminal_row * VGA_WIDTH + terminal_column;
-    terminal_buffer[index] = (uint16_t) c | (uint16_t) terminal_color << 8;
-    
-    // Advance the cursor
-    terminal_column++;
-    
-    // If we hit the right edge of the screen, wrap around to the next line
-    if (terminal_column == VGA_WIDTH) {
-        terminal_column = 0;
-        terminal_row++;
+    // SCROLLING LOGIC
+    // If the row reaches the bottom of the screen (25), shift everything up!
+    if (terminal_row == VGA_HEIGHT) {
+        // 1. Copy rows 1-24 up to rows 0-23
+        for (size_t y = 1; y < VGA_HEIGHT; y++) {
+            for (size_t x = 0; x < VGA_WIDTH; x++) {
+                terminal_buffer[(y - 1) * VGA_WIDTH + x] = terminal_buffer[y * VGA_WIDTH + x];
+            }
+        }
+        // 2. Clear the very bottom row (row 24)
+        for (size_t x = 0; x < VGA_WIDTH; x++) {
+            terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
+        }
+        // 3. Keep the cursor on the bottom row
+        terminal_row = VGA_HEIGHT - 1;
     }
 }
 

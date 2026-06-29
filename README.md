@@ -8,10 +8,10 @@ The project is currently being developed as a 32-bit x86 system to establish a s
 - **Bootloader Entry:** Multiboot-compliant entry point (`boot.asm`)
 - **Memory Management:** Global Descriptor Table (GDT) initialization
 - **Interrupts:** Interrupt Descriptor Table (IDT) setup
-- **Display Driver:** Custom VGA text-mode driver for terminal output
+- **Display Driver:** Custom VGA text-mode driver with screen scrolling (Green on Black)
+- **Keyboard Input:** PS/2 Scancode translation to US-QWERTY
 
 ## Roadmap
-- [ ] Keyboard input driver
 - [ ] Basic memory allocation
 - [ ] Transition to 64-bit Long Mode:
   - [ ] Implement Paging (PAE)
