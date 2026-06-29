@@ -112,8 +112,8 @@ void pic_remap() {
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0x0);  // Unmask all interrupts
-    outb(0xA1, 0x0);
+    outb(0x21, 0xFD); // Mask all except Keyboard (IRQ 1)
+    outb(0xA1, 0xFF); // Mask all slave interrupts
 }
 
 // --- KEYBOARD HANDLER ---
@@ -210,4 +210,10 @@ void kernel_main(void) {
     print_string("GDT Loaded: Kernel now has memory authority!\n");
     print_string("IDT Loaded: Keyboard interrupts enabled!\n");
     print_string("\nTry pressing some keys...\n\n");
+    
+    // Enter an infinite loop so the kernel never returns
+    // 'hlt' puts the CPU to sleep until the next interrupt fires
+    while (1) {
+        asm volatile("hlt");
+    }
 }
