@@ -89,6 +89,7 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
 
 void print_string(const char* data);
 void terminal_putchar(char c);
+void terminal_initialize(void);
 
 // --- HARDWARE I/O PORTS ---
 // Write data to a hardware port
@@ -155,22 +156,65 @@ const char keyboard_map[128] = {
     0, /* All other keys are undefined */
 };
 
+// --- COMMAND SHELL ---
+char command_buffer[256];
+size_t command_len = 0;
+
+void execute_command(char* input) {
+    if (strcmp(input, "help") == 0) {
+        print_string("Available commands:\n");
+        print_string("  help  - Show this message\n");
+        print_string("  clear - Clear the screen\n");
+        print_string("  echo  - Print text to the screen\n");
+    } else if (strcmp(input, "clear") == 0) {
+        terminal_initialize();
+    } else if (input[0] == 'e' && input[1] == 'c' && input[2] == 'h' && input[3] == 'o' && input[4] == ' ') {
+        print_string(&input[5]);
+        print_string("\n");
+    } else if (strlen(input) > 0) {
+        print_string("Unknown command: ");
+        print_string(input);
+        print_string("\n");
+    }
+}
+
 // This is the function the CPU jumps to when you press a key!
 void keyboard_handler_c() {
-    // The keyboard data port is always 0x60
     uint8_t scancode = inb(0x60); 
     
-    // SECURE ARRAY LOOKUP: 
-    // Ensure the scancode is less than 128 (meaning it was PRESSED, not released)
-    // and that it fits within our array bounds to prevent memory vulnerabilities!
     if (scancode < 128) { 
         char c = keyboard_map[scancode];
-        if (c != 0) { // If it's a valid, printable character
-            terminal_putchar(c);
+        if (c != 0) { 
+            // Handle Backspace
+            if (c == '\b') {
+                if (command_len > 0) {
+                    command_len--;
+                    command_buffer[command_len] = '\0';
+                    terminal_putchar(c); // Erase from screen
+                }
+            } 
+            // Handle Enter
+            else if (c == '\n') {
+                terminal_putchar('\n');
+                command_buffer[command_len] = '\0';
+                execute_command(command_buffer);
+                
+                // Reset buffer and print prompt
+                command_len = 0;
+                command_buffer[0] = '\0';
+                print_string("SineOS> ");
+            } 
+            // Handle Normal Characters
+            else {
+                if (command_len < 255) {
+                    command_buffer[command_len] = c;
+                    command_len++;
+                    terminal_putchar(c);
+                }
+            }
         }
     }
     
-    // We must tell the PIC that we finished handling the interrupt
     outb(0x20, 0x20);
 }
 
@@ -274,14 +318,9 @@ void kernel_main(void) {
     print_string("GDT Loaded: Kernel now has memory authority!\n");
     print_string("IDT Loaded: Keyboard interrupts enabled!\n");
     
-    // Test our new libc itoa function
-    char number_buffer[16];
-    itoa(1337, number_buffer, 10);
-    print_string("Testing libc itoa: ");
-    print_string(number_buffer);
-    print_string("\n");
-
-    print_string("\nTry pressing some keys...\n\n");
+    print_string("\nWelcome to Sine OS!\n");
+    print_string("Type 'help' to see available commands.\n\n");
+    print_string("SineOS> ");
     
     // Enter an infinite loop so the kernel never returns
     // 'hlt' puts the CPU to sleep until the next interrupt fires
