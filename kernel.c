@@ -238,6 +238,15 @@ void init_idt() {
 }
 
 
+// Update the hardware cursor position
+void update_cursor(size_t x, size_t y) {
+    uint16_t pos = y * VGA_WIDTH + x;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t) (pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t) ((pos >> 8) & 0xFF));
+}
+
 // 1. Initialize the terminal and clear the screen
 void terminal_initialize(void) {
     terminal_row = 0;
@@ -248,6 +257,7 @@ void terminal_initialize(void) {
             terminal_buffer[index] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
         }
     }
+    update_cursor(terminal_column, terminal_row);
 }
 
 // 2. The core function: Write a single character and advance the cursor
@@ -265,6 +275,7 @@ void terminal_putchar(char c) {
         // Clear the character at the new cursor position
         const size_t index = terminal_row * VGA_WIDTH + terminal_column;
         terminal_buffer[index] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
+        update_cursor(terminal_column, terminal_row);
         return; // Exit early so we don't print a weird symbol
     } else {
         const size_t index = terminal_row * VGA_WIDTH + terminal_column;
@@ -292,6 +303,8 @@ void terminal_putchar(char c) {
         // 3. Keep the cursor on the bottom row
         terminal_row = VGA_HEIGHT - 1;
     }
+    
+    update_cursor(terminal_column, terminal_row);
 }
 
 // 3. Write a full string of text
