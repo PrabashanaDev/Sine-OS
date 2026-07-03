@@ -22,6 +22,10 @@ void draw_char(uint32_t x, uint32_t y, char c, uint32_t color);
 // Draw a null-terminated string starting at pixel position (x, y)
 void draw_string(uint32_t x, uint32_t y, const char* str, uint32_t color);
 
+// Mouse cursor rendering
+void draw_mouse_cursor(int x, int y);
+void erase_mouse_cursor(int x, int y);
+
 // Get the screen width
 uint32_t get_screen_width(void);
 

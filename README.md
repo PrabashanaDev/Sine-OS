@@ -12,11 +12,11 @@ The project is currently being developed as a 32-bit x86 system to establish a s
 - **Bitmap Font Renderer:** 8x8 pixel font engine for drawing text in graphical mode
 - **Graphical Terminal:** Interactive command shell rendered inside a GUI window with scrolling
 - **Keyboard Input:** PS/2 Scancode translation to US-QWERTY
+- **Mouse Input:** PS/2 Mouse Driver with graphical cursor and background pixel caching
 - **Standard Library:** Basic libc functions (`strlen`, `strcmp`, `memset`, `itoa`)
 - **Bootable ISO:** GRUB-based ISO image for emulators and real hardware
 
 ## Roadmap
-- [ ] Mouse driver support
 - [ ] Transition to 64-bit Long Mode:
   - [ ] Implement Paging (PAE)
   - [ ] Update GDT for 64-bit descriptors

@@ -76,6 +76,62 @@ void draw_string(uint32_t x, uint32_t y, const char* str, uint32_t color) {
     }
 }
 
+// =============================================================
+// ==================== MOUSE CURSOR CACHE =====================
+// =============================================================
+
+static uint32_t bg_buffer[5][5];
+static int cursor_drawn = 0;
+static int last_mouse_x = 0;
+static int last_mouse_y = 0;
+
+static uint32_t get_pixel(uint32_t x, uint32_t y) {
+    if (x >= screen_width || y >= screen_height) return 0;
+    uint32_t offset = y * screen_pitch + x * (screen_bpp / 8);
+    uint32_t b = framebuffer[offset];
+    uint32_t g = framebuffer[offset + 1];
+    uint32_t r = framebuffer[offset + 2];
+    return (r << 16) | (g << 8) | b;
+}
+
+void erase_mouse_cursor(int x, int y) {
+    (void)x; (void)y;
+    if (!cursor_drawn) return;
+    
+    // Restore the exact pixels that were under the mouse before we drew it!
+    for (int row = 0; row < 5; row++) {
+        for (int col = 0; col < 5; col++) {
+            draw_pixel(last_mouse_x + col, last_mouse_y + row, bg_buffer[row][col]);
+        }
+    }
+    cursor_drawn = 0;
+}
+
+void draw_mouse_cursor(int x, int y) {
+    // 1. Take a screenshot of the 5x5 background underneath the new cursor position
+    for (int row = 0; row < 5; row++) {
+        for (int col = 0; col < 5; col++) {
+            bg_buffer[row][col] = get_pixel(x + col, y + row);
+        }
+    }
+    
+    // 2. Draw a 5x5 White Crosshair Cursor
+    uint32_t c = 0x00FFFFFF;
+    draw_pixel(x + 2, y + 0, c);
+    draw_pixel(x + 2, y + 1, c);
+    draw_pixel(x + 0, y + 2, c);
+    draw_pixel(x + 1, y + 2, c);
+    draw_pixel(x + 2, y + 2, c);
+    draw_pixel(x + 3, y + 2, c);
+    draw_pixel(x + 4, y + 2, c);
+    draw_pixel(x + 2, y + 3, c);
+    draw_pixel(x + 2, y + 4, c);
+    
+    last_mouse_x = x;
+    last_mouse_y = y;
+    cursor_drawn = 1;
+}
+
 uint32_t get_screen_width(void) {
     return screen_width;
 }

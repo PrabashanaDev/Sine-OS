@@ -2,6 +2,7 @@
 #include "multiboot.h"
 #include "pmm.h"
 #include "graphics.h"
+#include "mouse.h"
 
 // --- GDT STRUCTURES ---
 struct gdt_entry_struct {
@@ -89,8 +90,8 @@ void pic_remap() {
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFD);
-    outb(0xA1, 0xFF);
+    outb(0x21, 0xF9); // Unmask IRQ 1 (Keyboard) and IRQ 2 (Cascade)
+    outb(0xA1, 0xEF); // Unmask IRQ 12 (Mouse)
 }
 
 // =============================================================
@@ -419,6 +420,7 @@ void keyboard_handler_c() {
 // Function to load the IDT into the CPU
 extern void idt_flush(uint32_t); 
 extern void keyboard_handler_isr();
+extern void mouse_handler_isr();
 void init_idt() {
     idt_ptr.limit = (sizeof(struct idt_entry_struct) * 256) - 1;
     idt_ptr.base  = (uint32_t)&idt_entries;
@@ -428,6 +430,7 @@ void init_idt() {
     }
 
     idt_set_gate(33, (uint32_t)keyboard_handler_isr, 0x08, 0x8E);
+    idt_set_gate(44, (uint32_t)mouse_handler_isr, 0x08, 0x8E);
     idt_flush((uint32_t)&idt_ptr);
 }
 
@@ -447,6 +450,9 @@ void kernel_main(uint32_t magic, multiboot_info_t* mbd) {
     
     // Initialize graphics
     init_graphics(mbd);
+    
+    // Initialize Mouse
+    mouse_init();
     
     // Enable interrupts
     asm volatile("sti"); 
