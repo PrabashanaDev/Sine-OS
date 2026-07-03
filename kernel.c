@@ -1,17 +1,7 @@
 #include "string.h"
-
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-
-const size_t VGA_WIDTH = 80;
-const size_t VGA_HEIGHT = 25;
-uint16_t* terminal_buffer = (uint16_t*) 0xB8000;
-
-// These variables keep track of where the cursor is
-size_t terminal_row = 0;
-size_t terminal_column = 0;
-uint8_t terminal_color = 2; // 2 = Green text on Black background // White on black
+#include "multiboot.h"
+#include "pmm.h"
+#include "graphics.h"
 
 // --- GDT STRUCTURES ---
 struct gdt_entry_struct {
@@ -21,7 +11,7 @@ struct gdt_entry_struct {
     uint8_t  access;
     uint8_t  granularity;
     uint8_t  base_high;
-} __attribute__((packed)); // 'packed' prevents the compiler from messing with memory alignment
+} __attribute__((packed));
 
 struct gdt_ptr_struct {
     uint16_t limit;
@@ -31,10 +21,8 @@ struct gdt_ptr_struct {
 struct gdt_entry_struct gdt_entries[3];
 struct gdt_ptr_struct   gdt_ptr;
 
-// This links to the assembly function we just wrote in gdt.asm
 extern void gdt_flush(uint32_t); 
 
-// Function to populate a single GDT entry
 void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
     gdt_entries[num].base_low    = (base & 0xFFFF);
     gdt_entries[num].base_middle = (base >> 16) & 0xFF;
@@ -45,26 +33,21 @@ void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_
     gdt_entries[num].access      = access;
 }
 
-// Function to set up the whole table
 void init_gdt() {
     gdt_ptr.limit = (sizeof(struct gdt_entry_struct) * 3) - 1;
     gdt_ptr.base  = (uint32_t)&gdt_entries;
 
-    // The CPU requires the very first entry to be completely zeroed out (Null Segment)
     gdt_set_gate(0, 0, 0, 0, 0);                
-    // Segment 1: Kernel Code Segment (Exec/Read, covers all 4GB)
     gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF); 
-    // Segment 2: Kernel Data Segment (Read/Write, covers all 4GB)
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); 
 
-    // Tell the CPU to apply these changes!
     gdt_flush((uint32_t)&gdt_ptr);
 }
 
 // --- IDT STRUCTURES ---
 struct idt_entry_struct {
     uint16_t base_low;
-    uint16_t sel;        // Kernel segment
+    uint16_t sel;
     uint8_t  always0;    
     uint8_t  flags;      
     uint16_t base_high;
@@ -78,7 +61,6 @@ struct idt_ptr_struct {
 struct idt_entry_struct idt_entries[256];
 struct idt_ptr_struct   idt_ptr;
 
-// Function to set an entry in the IDT
 void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt_entries[num].base_low = (base & 0xFFFF);
     idt_entries[num].base_high = (base >> 16) & 0xFFFF;
@@ -87,16 +69,10 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt_entries[num].flags = flags;
 }
 
-void print_string(const char* data);
-void terminal_putchar(char c);
-void terminal_initialize(void);
-
 // --- HARDWARE I/O PORTS ---
-// Write data to a hardware port
 static inline void outb(uint16_t port, uint8_t val) {
     asm volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
 }
-// Read data from a hardware port
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     asm volatile ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
@@ -104,112 +80,334 @@ static inline uint8_t inb(uint16_t port) {
 }
 
 // --- PIC REMAPPING ---
-// By default, hardware interrupts clash with CPU errors. 
-// We must remap them to start at Interrupt 32.
 void pic_remap() {
     outb(0x20, 0x11);
     outb(0xA0, 0x11);
-    outb(0x21, 0x20); // Master PIC offset (Interrupt 32)
-    outb(0xA1, 0x28); // Slave PIC offset (Interrupt 40)
+    outb(0x21, 0x20);
+    outb(0xA1, 0x28);
     outb(0x21, 0x04);
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFD); // Mask all except Keyboard (IRQ 1)
-    outb(0xA1, 0xFF); // Mask all slave interrupts
+    outb(0x21, 0xFD);
+    outb(0xA1, 0xFF);
 }
 
-// --- KEYBOARD MAP & HANDLER ---
-// Standard US QWERTY Scancode lookup table
-const char keyboard_map[128] = {
-    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', /* Backspace */
-  '\t', /* Tab */
-  'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', /* Enter */
-    0, /* 29   - Control */
-  'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',   0, /* Left shift */
- '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',   0, /* Right shift */
-  '*',
-    0,  /* Alt */
-  ' ',  /* Space bar */
-    0,  /* Caps lock */
-    0,  /* 59 - F1 key ... > */
-    0,   0,   0,   0,   0,   0,   0,   0,
-    0,  /* < ... F10 */
-    0,  /* 69 - Num lock*/
-    0,  /* Scroll Lock */
-    0,  /* Home key */
-    0,  /* Up Arrow */
-    0,  /* Page Up */
-  '-',
-    0,  /* Left Arrow */
-    0,
-    0,  /* Right Arrow */
-  '+',
-    0,  /* 79 - End key*/
-    0,  /* Down Arrow */
-    0,  /* Page Down */
-    0,  /* Insert Key */
-    0,  /* Delete Key */
-    0,   0,   0,
-    0,  /* F11 Key */
-    0,  /* F12 Key */
-    0, /* All other keys are undefined */
-};
+// =============================================================
+// ==================== DESKTOP GUI DRAWING ====================
+// =============================================================
 
-// --- COMMAND SHELL ---
+// Color Palette (0x00RRGGBB)
+#define COLOR_DESKTOP_TOP  0x001A3A5A
+#define COLOR_TASKBAR      0x001E1E2E
+#define COLOR_TASKBAR_TOP  0x00313145
+#define COLOR_WINDOW_BG    0x001A1A2A
+#define COLOR_WINDOW_TITLE 0x002A2A40
+#define COLOR_WINDOW_BORDER 0x00404058
+#define COLOR_ACCENT       0x006C9BD2
+#define COLOR_TEXT_GREEN    0x0040E870
+#define COLOR_TEXT_LIGHT   0x00D0D0E0
+#define COLOR_START_BTN    0x004A7FB5
+#define COLOR_CURSOR       0x0040E870
+
+// Draw a horizontal line
+void draw_hline(uint32_t x, uint32_t y, uint32_t width, uint32_t color) {
+    for (uint32_t i = 0; i < width; i++) {
+        draw_pixel(x + i, y, color);
+    }
+}
+
+// Draw a vertical line
+void draw_vline(uint32_t x, uint32_t y, uint32_t height, uint32_t color) {
+    for (uint32_t i = 0; i < height; i++) {
+        draw_pixel(x, y + i, color);
+    }
+}
+
+// Draw a rectangle outline
+void draw_rect_outline(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    draw_hline(x, y, w, color);
+    draw_hline(x, y + h - 1, w, color);
+    draw_vline(x, y, h, color);
+    draw_vline(x + w - 1, y, h, color);
+}
+
+// =============================================================
+// ================ GRAPHICAL TERMINAL ENGINE ==================
+// =============================================================
+
+// Terminal window position and size (inside the main window)
+#define TERM_WIN_X      30
+#define TERM_WIN_Y      30
+#define TERM_WIN_W      740
+#define TERM_WIN_H      500
+#define TERM_TITLE_H    28
+
+// Terminal text area (inside the window body)
+#define TERM_PAD        8
+#define TERM_TEXT_X     (TERM_WIN_X + TERM_PAD)
+#define TERM_TEXT_Y     (TERM_WIN_Y + TERM_TITLE_H + 1 + TERM_PAD)
+#define TERM_TEXT_W     (TERM_WIN_W - TERM_PAD * 2)
+#define TERM_TEXT_H     (TERM_WIN_H - TERM_TITLE_H - 1 - TERM_PAD * 2)
+
+// Character grid dimensions
+#define CHAR_W          8
+#define CHAR_H          10   // 8px glyph + 2px line spacing
+#define TERM_COLS       (TERM_TEXT_W / CHAR_W)
+#define TERM_ROWS       (TERM_TEXT_H / CHAR_H)
+
+// Terminal state
+static size_t term_col = 0;
+static size_t term_row = 0;
+
+// Forward declarations
+void gfx_putchar(char c);
+void gfx_print(const char* str);
+void term_scroll(void);
+void term_clear_row(size_t row);
+void draw_cursor(void);
+void erase_cursor(void);
+
+// Draw the desktop background and the terminal window frame
+void draw_desktop(void) {
+    uint32_t sw = get_screen_width();
+    uint32_t sh = get_screen_height();
+    uint32_t taskbar_height = 36;
+    
+    // Desktop gradient background
+    for (uint32_t y = 0; y < sh - taskbar_height; y++) {
+        uint32_t r = 0x1A + (y * 0x20) / (sh - taskbar_height);
+        uint32_t g = 0x3A + (y * 0x30) / (sh - taskbar_height);
+        uint32_t b = 0x5A + (y * 0x35) / (sh - taskbar_height);
+        if (r > 0xFF) r = 0xFF;
+        if (g > 0xFF) g = 0xFF;
+        if (b > 0xFF) b = 0xFF;
+        uint32_t color = (r << 16) | (g << 8) | b;
+        draw_hline(0, y, sw, color);
+    }
+    
+    // Taskbar
+    draw_rect(0, sh - taskbar_height, sw, taskbar_height, COLOR_TASKBAR);
+    draw_hline(0, sh - taskbar_height, sw, COLOR_TASKBAR_TOP);
+    
+    // Start Button
+    draw_rect(4, sh - taskbar_height + 6, 70, 24, COLOR_START_BTN);
+    draw_hline(4, sh - taskbar_height + 6, 70, COLOR_ACCENT);
+    draw_string(14, sh - taskbar_height + 14, "SineOS", COLOR_TEXT_LIGHT);
+    
+    // Terminal window border
+    draw_rect_outline(TERM_WIN_X - 1, TERM_WIN_Y - 1, TERM_WIN_W + 2, TERM_WIN_H + 2, COLOR_WINDOW_BORDER);
+    
+    // Terminal window title bar
+    draw_rect(TERM_WIN_X, TERM_WIN_Y, TERM_WIN_W, TERM_TITLE_H, COLOR_WINDOW_TITLE);
+    draw_string(TERM_WIN_X + 10, TERM_WIN_Y + 10, "Terminal", COLOR_TEXT_LIGHT);
+    
+    // Close button
+    draw_rect(TERM_WIN_X + TERM_WIN_W - 22, TERM_WIN_Y + 6, 16, 16, 0x00E04848);
+    // Minimize button
+    draw_rect(TERM_WIN_X + TERM_WIN_W - 44, TERM_WIN_Y + 6, 16, 16, 0x00D4A843);
+    
+    // Accent line under title
+    draw_hline(TERM_WIN_X, TERM_WIN_Y + TERM_TITLE_H, TERM_WIN_W, COLOR_ACCENT);
+    
+    // Terminal body (dark background)
+    draw_rect(TERM_WIN_X, TERM_WIN_Y + TERM_TITLE_H + 1, TERM_WIN_W, TERM_WIN_H - TERM_TITLE_H - 1, COLOR_WINDOW_BG);
+}
+
+// Clear a single row of the terminal text area
+void term_clear_row(size_t row) {
+    uint32_t px_y = TERM_TEXT_Y + row * CHAR_H;
+    draw_rect(TERM_TEXT_X, px_y, TERM_TEXT_W, CHAR_H, COLOR_WINDOW_BG);
+}
+
+// Scroll the terminal up by one row by redrawing
+// We shift pixel data up by CHAR_H pixels within the terminal body
+void term_scroll(void) {
+    uint8_t* fb = get_framebuffer();
+    uint32_t pitch = get_screen_pitch();
+    uint32_t bpp = get_screen_bpp() / 8;
+    
+    // Number of pixel rows to shift
+    uint32_t total_text_pixel_rows = TERM_ROWS * CHAR_H;
+    uint32_t shift_rows = total_text_pixel_rows - CHAR_H;
+    
+    // Copy each row of pixels up by CHAR_H pixels
+    for (uint32_t py = 0; py < shift_rows; py++) {
+        uint32_t src_y = TERM_TEXT_Y + py + CHAR_H;
+        uint32_t dst_y = TERM_TEXT_Y + py;
+        uint32_t src_offset = src_y * pitch + TERM_TEXT_X * bpp;
+        uint32_t dst_offset = dst_y * pitch + TERM_TEXT_X * bpp;
+        
+        // Copy one row of terminal text pixels
+        uint8_t* src = fb + src_offset;
+        uint8_t* dst = fb + dst_offset;
+        for (uint32_t b = 0; b < TERM_TEXT_W * bpp; b++) {
+            dst[b] = src[b];
+        }
+    }
+    
+    // Clear the bottom row
+    term_clear_row(TERM_ROWS - 1);
+}
+
+// Draw a blinking cursor block at the current position
+void draw_cursor(void) {
+    uint32_t px_x = TERM_TEXT_X + term_col * CHAR_W;
+    uint32_t px_y = TERM_TEXT_Y + term_row * CHAR_H;
+    draw_rect(px_x, px_y, CHAR_W, CHAR_H - 2, COLOR_CURSOR);
+}
+
+// Erase the cursor by overwriting with background color
+void erase_cursor(void) {
+    uint32_t px_x = TERM_TEXT_X + term_col * CHAR_W;
+    uint32_t px_y = TERM_TEXT_Y + term_row * CHAR_H;
+    draw_rect(px_x, px_y, CHAR_W, CHAR_H - 2, COLOR_WINDOW_BG);
+}
+
+// Write a single character to the graphical terminal
+void gfx_putchar(char c) {
+    erase_cursor();
+    
+    if (c == '\n') {
+        term_col = 0;
+        term_row++;
+    } else if (c == '\b') {
+        if (term_col > 0) {
+            term_col--;
+        } else if (term_row > 0) {
+            term_row--;
+            term_col = TERM_COLS - 1;
+        }
+        // Erase the character at the new position
+        uint32_t px_x = TERM_TEXT_X + term_col * CHAR_W;
+        uint32_t px_y = TERM_TEXT_Y + term_row * CHAR_H;
+        draw_rect(px_x, px_y, CHAR_W, CHAR_H, COLOR_WINDOW_BG);
+        draw_cursor();
+        return;
+    } else {
+        // Draw the character at the current cursor position
+        uint32_t px_x = TERM_TEXT_X + term_col * CHAR_W;
+        uint32_t px_y = TERM_TEXT_Y + term_row * CHAR_H;
+        draw_char(px_x, px_y, c, COLOR_TEXT_GREEN);
+        
+        term_col++;
+        if (term_col >= TERM_COLS) {
+            term_col = 0;
+            term_row++;
+        }
+    }
+    
+    // Handle scrolling
+    if (term_row >= TERM_ROWS) {
+        term_scroll();
+        term_row = TERM_ROWS - 1;
+    }
+    
+    draw_cursor();
+}
+
+// Print a full string to the graphical terminal
+void gfx_print(const char* str) {
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        gfx_putchar(str[i]);
+    }
+}
+
+// Clear the entire terminal text area
+void term_clear(void) {
+    draw_rect(TERM_WIN_X, TERM_WIN_Y + TERM_TITLE_H + 1, TERM_WIN_W, TERM_WIN_H - TERM_TITLE_H - 1, COLOR_WINDOW_BG);
+    term_col = 0;
+    term_row = 0;
+    draw_cursor();
+}
+
+// =============================================================
+// ====================== COMMAND SHELL ========================
+// =============================================================
+
 char command_buffer[256];
 size_t command_len = 0;
 
 void execute_command(char* input) {
     if (strcmp(input, "help") == 0) {
-        print_string("Available commands:\n");
-        print_string("  help  - Show this message\n");
-        print_string("  clear - Clear the screen\n");
-        print_string("  echo  - Print text to the screen\n");
+        gfx_print("Available commands:\n");
+        gfx_print("  help  - Show this message\n");
+        gfx_print("  clear - Clear the screen\n");
+        gfx_print("  echo  - Print text to the screen\n");
+        gfx_print("  alloc - Allocate a 4KB memory block\n");
     } else if (strcmp(input, "clear") == 0) {
-        terminal_initialize();
+        term_clear();
     } else if (input[0] == 'e' && input[1] == 'c' && input[2] == 'h' && input[3] == 'o' && input[4] == ' ') {
-        print_string(&input[5]);
-        print_string("\n");
+        gfx_print(&input[5]);
+        gfx_print("\n");
+    } else if (strcmp(input, "alloc") == 0) {
+        uint32_t addr = pmm_alloc_block();
+        if (addr == 0) {
+            gfx_print("ERROR: Out of Memory!\n");
+        } else {
+            char hex_buf[16];
+            itoa(addr, hex_buf, 16);
+            gfx_print("Allocated 4KB block at 0x");
+            gfx_print(hex_buf);
+            gfx_print("\n");
+        }
     } else if (strlen(input) > 0) {
-        print_string("Unknown command: ");
-        print_string(input);
-        print_string("\n");
+        gfx_print("Unknown command: ");
+        gfx_print(input);
+        gfx_print("\n");
     }
 }
 
-// This is the function the CPU jumps to when you press a key!
+// --- KEYBOARD MAP & HANDLER ---
+const char keyboard_map[128] = {
+    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+  '\t',
+  'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0,
+  'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',   0,
+ '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',   0,
+  '*',
+    0,
+  ' ',
+    0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+  '-',
+    0, 0, 0,
+  '+',
+    0, 0, 0, 0, 0,
+    0, 0, 0,
+    0, 0,
+    0,
+};
+
 void keyboard_handler_c() {
     uint8_t scancode = inb(0x60); 
     
     if (scancode < 128) { 
         char c = keyboard_map[scancode];
         if (c != 0) { 
-            // Handle Backspace
             if (c == '\b') {
                 if (command_len > 0) {
                     command_len--;
                     command_buffer[command_len] = '\0';
-                    terminal_putchar(c); // Erase from screen
+                    gfx_putchar(c);
                 }
             } 
-            // Handle Enter
             else if (c == '\n') {
-                terminal_putchar('\n');
+                gfx_putchar('\n');
                 command_buffer[command_len] = '\0';
                 execute_command(command_buffer);
                 
-                // Reset buffer and print prompt
                 command_len = 0;
                 command_buffer[0] = '\0';
-                print_string("SineOS> ");
+                gfx_print("SineOS> ");
             } 
-            // Handle Normal Characters
             else {
                 if (command_len < 255) {
                     command_buffer[command_len] = c;
                     command_len++;
-                    terminal_putchar(c);
+                    gfx_putchar(c);
                 }
             }
         }
@@ -220,123 +418,56 @@ void keyboard_handler_c() {
 
 // Function to load the IDT into the CPU
 extern void idt_flush(uint32_t); 
-extern void keyboard_handler_isr(); // Link to assembly
+extern void keyboard_handler_isr();
 void init_idt() {
     idt_ptr.limit = (sizeof(struct idt_entry_struct) * 256) - 1;
     idt_ptr.base  = (uint32_t)&idt_entries;
     
-    // Clear the table
     for(int i = 0; i < 256; i++) {
         idt_set_gate(i, 0, 0, 0);
     }
 
-    // MAP INTERRUPT 33 TO THE KEYBOARD HANDLER
-    // 0x08 is our Kernel Code Segment, 0x8E means "32-bit Interrupt Gate"
     idt_set_gate(33, (uint32_t)keyboard_handler_isr, 0x08, 0x8E);
-
     idt_flush((uint32_t)&idt_ptr);
 }
 
-
-// Update the hardware cursor position
-void update_cursor(size_t x, size_t y) {
-    uint16_t pos = y * VGA_WIDTH + x;
-    outb(0x3D4, 0x0F);
-    outb(0x3D5, (uint8_t) (pos & 0xFF));
-    outb(0x3D4, 0x0E);
-    outb(0x3D5, (uint8_t) ((pos >> 8) & 0xFF));
-}
-
-// 1. Initialize the terminal and clear the screen
-void terminal_initialize(void) {
-    terminal_row = 0;
-    terminal_column = 0;
-    for (size_t y = 0; y < VGA_HEIGHT; y++) {
-        for (size_t x = 0; x < VGA_WIDTH; x++) {
-            const size_t index = y * VGA_WIDTH + x;
-            terminal_buffer[index] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
-        }
-    }
-    update_cursor(terminal_column, terminal_row);
-}
-
-// 2. The core function: Write a single character and advance the cursor
-void terminal_putchar(char c) {
-    if (c == '\n') {
-        terminal_column = 0;
-        terminal_row++;
-    } else if (c == '\b') { // Handle backspace
-        if (terminal_column > 0) {
-            terminal_column--;
-        } else if (terminal_row > 0) {
-            terminal_row--;
-            terminal_column = VGA_WIDTH - 1;
-        }
-        // Clear the character at the new cursor position
-        const size_t index = terminal_row * VGA_WIDTH + terminal_column;
-        terminal_buffer[index] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
-        update_cursor(terminal_column, terminal_row);
-        return; // Exit early so we don't print a weird symbol
-    } else {
-        const size_t index = terminal_row * VGA_WIDTH + terminal_column;
-        terminal_buffer[index] = (uint16_t) c | (uint16_t) terminal_color << 8;
-        terminal_column++;
-        if (terminal_column == VGA_WIDTH) {
-            terminal_column = 0;
-            terminal_row++;
-        }
-    }
-
-    // SCROLLING LOGIC
-    // If the row reaches the bottom of the screen (25), shift everything up!
-    if (terminal_row == VGA_HEIGHT) {
-        // 1. Copy rows 1-24 up to rows 0-23
-        for (size_t y = 1; y < VGA_HEIGHT; y++) {
-            for (size_t x = 0; x < VGA_WIDTH; x++) {
-                terminal_buffer[(y - 1) * VGA_WIDTH + x] = terminal_buffer[y * VGA_WIDTH + x];
-            }
-        }
-        // 2. Clear the very bottom row (row 24)
-        for (size_t x = 0; x < VGA_WIDTH; x++) {
-            terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = (uint16_t) ' ' | (uint16_t) terminal_color << 8;
-        }
-        // 3. Keep the cursor on the bottom row
-        terminal_row = VGA_HEIGHT - 1;
-    }
-    
-    update_cursor(terminal_column, terminal_row);
-}
-
-// 3. Write a full string of text
-void print_string(const char* data) {
-    for (size_t i = 0; data[i] != '\0'; i++) {
-        terminal_putchar(data[i]);
-    }
-}
-
 // --- The OS Entry Point ---
-void kernel_main(void) {
-    // Set up our clean terminal
-    terminal_initialize();
+void kernel_main(uint32_t magic, multiboot_info_t* mbd) {
     init_gdt();
-    
-    // Initialize Interrupts
     pic_remap();
     init_idt();
     
-    // 'sti' stands for Set Interrupts (turns the listener on)
+    if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
+        while(1) { asm volatile("hlt"); }
+    }
+    
+    // Initialize PMM
+    size_t total_memory_bytes = (mbd->mem_upper * 1024) + (1024 * 1024);
+    pmm_init(total_memory_bytes, 0); 
+    
+    // Initialize graphics
+    init_graphics(mbd);
+    
+    // Enable interrupts
     asm volatile("sti"); 
     
-    print_string("Terminal Engine Initialized.\n");
-    print_string("GDT Loaded: Kernel now has memory authority!\n");
-    print_string("IDT Loaded: Keyboard interrupts enabled!\n");
+    // Draw the desktop and terminal window
+    draw_desktop();
     
-    print_string("\nWelcome to Sine OS!\n");
-    print_string("Type 'help' to see available commands.\n\n");
-    print_string("SineOS> ");
+    // Print boot messages in the graphical terminal
+    gfx_print("Sine OS v0.3 - Graphical Terminal\n");
+    gfx_print("GDT Loaded. IDT Loaded. PMM Initialized.\n");
     
-    // Enter an infinite loop so the kernel never returns
-    // 'hlt' puts the CPU to sleep until the next interrupt fires
+    char mem_buf[16];
+    itoa(total_memory_bytes / (1024 * 1024), mem_buf, 10);
+    gfx_print("Tracking ");
+    gfx_print(mem_buf);
+    gfx_print(" MB of RAM.\n\n");
+    
+    gfx_print("Welcome to Sine OS!\n");
+    gfx_print("Type 'help' to see available commands.\n\n");
+    gfx_print("SineOS> ");
+    
     while (1) {
         asm volatile("hlt");
     }
